@@ -23,22 +23,25 @@ browser.action.onClicked.addListener(() => {
 
 async function copyCookies(tabId) {
   try {
-    const result = await browser.scripting.executeScript({
+    const tab = await browser.tabs.get(tabId);
+    const cookies = await browser.cookies.getAll({ url: tab.url });
+    const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+    await browser.scripting.executeScript({
       target: { tabId },
-      func: () => {
-        const cookies = document.cookie;
+      func: (text) => {
         const textarea = document.createElement('textarea');
-        textarea.value = cookies;
+        textarea.value = text;
         textarea.style.position = 'fixed';
         textarea.style.opacity = '0';
         document.body.appendChild(textarea);
         textarea.select();
         document.execCommand('copy');
         document.body.removeChild(textarea);
-        return cookies;
-      }
+      },
+      args: [cookieString]
     });
-    return result[0].result;
+    return cookieString;
   } catch (error) {
     console.error('[Tab Reuse] Error copying cookies:', error);
     return null;
