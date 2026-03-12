@@ -52,6 +52,15 @@ export function getRunJSCode(url) {
   }
 }
 
+export function hasRunJSFlag(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.searchParams.has('__run_js');
+  } catch (e) {
+    return false;
+  }
+}
+
 export function parseRunJSCommand(jsCode) {
   if (!jsCode) return { command: null, value: null };
 

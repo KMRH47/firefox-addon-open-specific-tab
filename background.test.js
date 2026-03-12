@@ -6,6 +6,7 @@ import {
   hasReuseFlag,
   removeReuseFlag,
   getRunJSCode,
+  hasRunJSFlag,
   hasCloseTabsFlag,
   parseRunJSCommand,
   removeRunJSFlag,
@@ -17,6 +18,17 @@ import {
   isPathPrefix,
 } from './url-utils.js';
 import { getLowestTabIndex } from './tab-utils.js';
+import {
+  buildCookieProbeUrl,
+  findBestRecentCookieRequest,
+  cookiePathMatchesRequestPath,
+  filterCookiesForRequest,
+  getCookieHeaderValue,
+  getRequestPathFromUrl,
+  normalizeCookieRequestPath,
+  pruneRecentCookieRequests,
+  requestPathMatchesRecord,
+} from './cookie-utils.js';
 
 const stripScheme = (url) => url.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');
 const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -45,8 +57,8 @@ const SPECIAL = ':;/?@&=+$,{}[]()<>#%"\'^~`|!* \t';
 
 const tests = {
   'normalizeUrlForComparison: handles special characters in query params': () => {
-    const withFlag = 'https://brunata.youtrack.cloud/agiles/141-18/current?query=has:%20-%7BSubtask%20of%7D%20or%20Subtask%20of:%20(type:%20Epic)&__reuse_tab=1';
-    const withoutFlag = 'https://brunata.youtrack.cloud/agiles/141-18/current?query=has%3A%20-%7BSubtask%20of%7D%20or%20Subtask%20of%3A%20(type%3A%20Epic)';
+    const withFlag = 'https://tracker.example.com/agiles/141-18/current?query=has:%20-%7BSubtask%20of%7D%20or%20Subtask%20of:%20(type:%20Epic)&__reuse_tab=1';
+    const withoutFlag = 'https://tracker.example.com/agiles/141-18/current?query=has%3A%20-%7BSubtask%20of%7D%20or%20Subtask%20of%3A%20(type%3A%20Epic)';
     assert.strictEqual(normalizeUrlForComparison(withFlag), normalizeUrlForComparison(withoutFlag));
   },
 
@@ -136,7 +148,7 @@ const tests = {
   },
 
   'hasReuseFlag: works with complex query strings': () => {
-    const url = 'https://brunata.youtrack.cloud/agiles/141-18/current?query=has:%20-%7BSubtask%20of%7D&__reuse_tab=1';
+    const url = 'https://tracker.example.com/agiles/141-18/current?query=has:%20-%7BSubtask%20of%7D&__reuse_tab=1';
     assert.strictEqual(hasReuseFlag(url), true);
   },
 
@@ -179,6 +191,16 @@ const tests = {
     assert.strictEqual(getRunJSCode('https://example.com?foo=bar'), null);
   },
 
+  'hasRunJSFlag: returns true when flag present': () => {
+    assert.strictEqual(hasRunJSFlag('https://example.com?__run_js=copy_cookies'), true);
+    assert.strictEqual(hasRunJSFlag('https://example.com?foo=bar&__run_js=test'), true);
+  },
+
+  'hasRunJSFlag: returns false when flag absent': () => {
+    assert.strictEqual(hasRunJSFlag('https://example.com'), false);
+    assert.strictEqual(hasRunJSFlag('https://example.com?foo=bar'), false);
+  },
+
   'getDomain: extracts and normalizes domain': () => {
     assert.strictEqual(getDomain('https://www.example.com/path'), 'example.com');
     assert.strictEqual(getDomain('https://Example.COM/path'), 'example.com');
@@ -195,6 +217,119 @@ const tests = {
     assert.strictEqual(isPathPrefix('https://example.com/app', 'https://example.com/app/page'), true);
     assert.strictEqual(isPathPrefix('https://example.com/app', 'https://example.com/app'), false);
     assert.strictEqual(isPathPrefix('https://example.com/app', 'https://example.com/application'), false);
+  },
+
+  'normalizeCookieRequestPath: uses tab path when no override is provided': () => {
+    assert.strictEqual(
+      normalizeCookieRequestPath(null, 'https://example.com/app/list?foo=bar'),
+      '/app/list'
+    );
+  },
+
+  'normalizeCookieRequestPath: normalizes relative and absolute cookie paths': () => {
+    assert.strictEqual(normalizeCookieRequestPath('app', 'https://example.com/'), '/app');
+    assert.strictEqual(
+      normalizeCookieRequestPath('https://example.com/app#hash', 'https://example.com/'),
+      '/app'
+    );
+  },
+
+  'cookiePathMatchesRequestPath: follows request path prefix rules': () => {
+    assert.strictEqual(cookiePathMatchesRequestPath('/app', '/app'), true);
+    assert.strictEqual(cookiePathMatchesRequestPath('/app', '/app/api'), true);
+    assert.strictEqual(cookiePathMatchesRequestPath('/app', '/application'), false);
+    assert.strictEqual(cookiePathMatchesRequestPath('/app/', '/app/api'), true);
+  },
+
+  'filterCookiesForRequest: keeps matching cookies and sorts by specificity': () => {
+    const cookies = filterCookiesForRequest([
+      { name: 'root', value: '1', path: '/' },
+      { name: 'app', value: '2', path: '/app' },
+      { name: 'nested', value: '3', path: '/app/api' },
+      { name: 'other', value: '4', path: '/iam' },
+    ], '/app/api/list');
+
+    assert.deepStrictEqual(cookies.map((cookie) => cookie.name), ['nested', 'app', 'root']);
+  },
+
+  'buildCookieProbeUrl: targets the requested path and adds a nonce marker': () => {
+    const probeUrl = new URL(buildCookieProbeUrl(
+      'https://example.com/',
+      '/app/api?x=1',
+      'nonce-123'
+    ));
+
+    assert.strictEqual(probeUrl.pathname, '/app/api');
+    assert.strictEqual(probeUrl.searchParams.get('x'), '1');
+    assert.strictEqual(probeUrl.searchParams.get('__tab_reuse_cookie_probe'), 'nonce-123');
+  },
+
+  'getCookieHeaderValue: finds the outgoing Cookie header case-insensitively': () => {
+    const header = getCookieHeaderValue([
+      { name: 'Accept', value: '*/*' },
+      { name: 'cookie', value: 'scoped_cookie=abc; root_cookie=bar' },
+    ]);
+
+    assert.strictEqual(header, 'scoped_cookie=abc; root_cookie=bar');
+  },
+
+  'getRequestPathFromUrl: returns pathname and search': () => {
+    assert.strictEqual(
+      getRequestPathFromUrl('https://example.com/app/api?x=1&y=2'),
+      '/app/api?x=1&y=2'
+    );
+  },
+
+  'pruneRecentCookieRequests: drops expired entries': () => {
+    const pruned = pruneRecentCookieRequests([
+      { requestPath: '/fresh', pathname: '/fresh', cookieHeader: 'a=1', time: 950 },
+      { requestPath: '/stale', pathname: '/stale', cookieHeader: 'b=2', time: 100 },
+    ], 1000, 100);
+
+    assert.deepStrictEqual(pruned.map((request) => request.requestPath), ['/fresh']);
+  },
+
+  'requestPathMatchesRecord: supports exact request match with query': () => {
+    assert.strictEqual(
+      requestPathMatchesRecord('/app/api?x=1', {
+        requestPath: '/app/api?x=1',
+        pathname: '/app/api',
+      }),
+      true
+    );
+    assert.strictEqual(
+      requestPathMatchesRecord('/app/api?x=1', {
+        requestPath: '/app/api?x=2',
+        pathname: '/app/api',
+      }),
+      false
+    );
+  },
+
+  'requestPathMatchesRecord: supports path-prefix lookup without query': () => {
+    assert.strictEqual(
+      requestPathMatchesRecord('/app', {
+        requestPath: '/app/api?x=1',
+        pathname: '/app/api',
+      }),
+      true
+    );
+    assert.strictEqual(
+      requestPathMatchesRecord('/app', {
+        requestPath: '/application?x=1',
+        pathname: '/application',
+      }),
+      false
+    );
+  },
+
+  'findBestRecentCookieRequest: returns the newest matching request': () => {
+    const result = findBestRecentCookieRequest([
+      { requestPath: '/app/newer', pathname: '/app/newer', cookieHeader: 'new=1', time: 2 },
+      { requestPath: '/app/older', pathname: '/app/older', cookieHeader: 'old=1', time: 1 },
+    ], '/app');
+
+    assert.strictEqual(result.cookieHeader, 'new=1');
   },
 
   'removeReuseFlag: removes flag from URL': () => {
@@ -284,13 +419,13 @@ const tests = {
   },
 
   'full flow: youtrack URL with special chars matches existing tab': () => {
-    const shortcutUrl = 'https://brunata.youtrack.cloud/agiles/141-18/current?query=has:%20-%7BSubtask%20of%7D%20or%20Subtask%20of:%20(type:%20Epic)&__reuse_tab=1';
-    const existingTabUrl = 'https://brunata.youtrack.cloud/agiles/141-18/current?query=has%3A%20-%7BSubtask%20of%7D%20or%20Subtask%20of%3A%20(type%3A%20Epic)';
+    const shortcutUrl = 'https://tracker.example.com/agiles/141-18/current?query=has:%20-%7BSubtask%20of%7D%20or%20Subtask%20of:%20(type:%20Epic)&__reuse_tab=1';
+    const existingTabUrl = 'https://tracker.example.com/agiles/141-18/current?query=has%3A%20-%7BSubtask%20of%7D%20or%20Subtask%20of%3A%20(type%3A%20Epic)';
     assert.strictEqual(normalizeUrlForComparison(shortcutUrl), normalizeUrlForComparison(existingTabUrl));
   },
 
   'full flow: github PRs URL works': () => {
-    const url = 'https://github.com/pulls?q=user%3Ateam-webbill+sort%3Aupdated-desc&__reuse_tab=1';
+    const url = 'https://github.com/pulls?q=user%3Ateam-example+sort%3Aupdated-desc&__reuse_tab=1';
     assert.strictEqual(hasReuseFlag(url), true);
     const normalized = normalizeUrlForComparison(url);
     assert.ok(!normalized.includes('__reuse_tab'));

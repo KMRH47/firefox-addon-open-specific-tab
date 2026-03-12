@@ -58,7 +58,17 @@ firefox "https://example.com?__reuse_tab=1&__run_js=delete_cookie=mykey"
 
 # Copy cookies to clipboard
 firefox "https://example.com?__reuse_tab=1&__run_js=copy_cookies"
+
+# Copy cookies for a specific path, using an observed request if available,
+# otherwise a best-effort probe request
+firefox "https://example.com?__reuse_tab=1&__run_js=copy_cookies=/app"
+
+# Copy only an exact observed Cookie request header from recent traffic
+firefox "https://example.com?__reuse_tab=1&__run_js=copy_cookies_exact=/app"
 ```
+
+`copy_cookies_exact=/path` waits for the next real request to that exact path if one
+has not been observed yet.
 
 ## Development
 

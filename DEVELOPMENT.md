@@ -38,7 +38,8 @@ feat: add configurable key event blocking
 ## Useful Query Params
 
 - `__reuse_tab=1` — reuse an existing tab when possible.
-- `__run_js=copy_cookies` / `delete_cookie=key` / `delete_cookies=prefix` — run helper actions.
+- `__run_js=copy_cookies` or `copy_cookies=/path` / `copy_cookies_exact=/exact/request/path` / `delete_cookie=key` / `delete_cookies=prefix` — run helper actions.
+  `copy_cookies_exact` waits for the next real matching request when needed.
 - `__close_tabs=pattern1,pattern2` — close matching tabs before reuse.
 
 Wildcard patterns are supported (`*`). If a pattern omits the scheme, it is matched

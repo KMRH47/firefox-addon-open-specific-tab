@@ -3,6 +3,7 @@ import {
   hasReuseFlag,
   removeReuseFlag,
   getRunJSCode,
+  hasRunJSFlag,
   parseRunJSCommand,
   removeRunJSFlag,
   getCloseTabsPatterns,
@@ -14,34 +15,273 @@ import {
   isPathPrefix,
 } from './url-utils.js';
 import { getLowestTabIndex } from './tab-utils.js';
+import {
+  COOKIE_PROBE_PARAM,
+  buildCookieProbeUrl,
+  findBestRecentCookieRequest,
+  getCookieHeaderValue,
+  getRequestPathFromUrl,
+  normalizeCookieRequestPath,
+  pruneRecentCookieRequests,
+  requestPathMatchesRecord,
+} from './cookie-utils.js';
 
 const handledTabs = new Set();
+const RECENT_COOKIE_REQUEST_TTL_MS = 5 * 60 * 1000;
+const MAX_RECENT_COOKIE_REQUESTS = 200;
+const recentCookieRequests = [];
+const PENDING_EXACT_COPY_TIMEOUT_MS = 60 * 1000;
+const pendingExactCookieCopies = new Map();
 
 browser.action.onClicked.addListener(() => {
   browser.runtime.openOptionsPage();
 });
 
-async function copyCookies(tabId) {
+function rememberRecentCookieRequest(details) {
+  const cookieHeader = getCookieHeaderValue(details.requestHeaders);
+  if (!cookieHeader) {
+    return;
+  }
+
+  let requestUrl;
+  try {
+    requestUrl = new URL(details.url);
+    if (!/^https?:$/.test(requestUrl.protocol)) {
+      return;
+    }
+  } catch (error) {
+    return;
+  }
+
+  const requestPath = getRequestPathFromUrl(details.url);
+  const domain = getDomain(details.url);
+  if (!requestPath) {
+    return;
+  }
+  if (!domain) {
+    return;
+  }
+
+  const now = Date.now();
+  const existingRequests = pruneRecentCookieRequests(
+    recentCookieRequests,
+    now,
+    RECENT_COOKIE_REQUEST_TTL_MS
+  );
+  const dedupedRequests = existingRequests.filter((request) => (
+    request.requestPath !== requestPath ||
+    request.domain !== domain ||
+    request.cookieStoreId !== (details.cookieStoreId || null)
+  ));
+  recentCookieRequests.length = 0;
+  recentCookieRequests.push({
+    requestPath,
+    pathname: requestPath.split('?')[0],
+    domain,
+    cookieStoreId: details.cookieStoreId || null,
+    tabId: details.tabId,
+    isProbe: requestUrl.searchParams.has(COOKIE_PROBE_PARAM),
+    isInternalCommand:
+      requestUrl.searchParams.has('__reuse_tab') ||
+      requestUrl.searchParams.has('__run_js') ||
+      requestUrl.searchParams.has('__close_tabs'),
+    probeNonce: requestUrl.searchParams.get(COOKIE_PROBE_PARAM),
+    cookieHeader,
+    time: now,
+  }, ...dedupedRequests.slice(0, MAX_RECENT_COOKIE_REQUESTS - 1));
+
+  const pendingEntries = [...pendingExactCookieCopies.entries()];
+  for (const [pendingId, pending] of pendingEntries) {
+    if (pending.domain !== domain) {
+      continue;
+    }
+
+    if (pending.cookieStoreId && details.cookieStoreId && pending.cookieStoreId !== details.cookieStoreId) {
+      continue;
+    }
+
+    if (!requestPathMatchesRecord(pending.requestPath, {
+      requestPath,
+      pathname: requestPath.split('?')[0],
+    })) {
+      continue;
+    }
+
+    clearTimeout(pending.timeoutId);
+    pendingExactCookieCopies.delete(pendingId);
+    copyTextToClipboard(pending.targetTabId, cookieHeader).catch((error) => {
+      console.error('[Tab Reuse] Error copying deferred cookies:', error);
+    });
+  }
+}
+
+function getRecentCookieRequests(tab, options = {}) {
+  const existingRequests = pruneRecentCookieRequests(
+    recentCookieRequests,
+    Date.now(),
+    RECENT_COOKIE_REQUEST_TTL_MS
+  );
+  recentCookieRequests.length = 0;
+  recentCookieRequests.push(...existingRequests);
+
+  const tabDomain = getDomain(tab.url);
+  if (!tabDomain) {
+    return [];
+  }
+
+  return existingRequests.filter((request) => {
+    if (request.domain !== tabDomain) {
+      return false;
+    }
+
+    if (request.cookieStoreId && tab.cookieStoreId) {
+      return request.cookieStoreId === tab.cookieStoreId;
+    }
+
+    if (!options.includeProbes && request.isProbe) {
+      return false;
+    }
+
+    if (!options.includeInternalCommands && request.isInternalCommand) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+async function copyTextToClipboard(tabId, text) {
+  await browser.scripting.executeScript({
+    target: { tabId },
+    func: (value) => {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    },
+    args: [text],
+  });
+}
+
+function getObservedCookieRequest(tab, requestPath) {
+  const recentRequests = getRecentCookieRequests(tab);
+  const matchedRequest = findBestRecentCookieRequest(recentRequests, requestPath);
+  return { recentRequests, matchedRequest };
+}
+
+function createCookieProbeNonce() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function triggerCookieProbe(tabId, probeUrl) {
+  await browser.scripting.executeScript({
+    target: { tabId },
+    func: async (url) => {
+      try {
+        await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+        });
+      } catch (error) {
+        // Ignore probe failures. The sent headers are what matters.
+      }
+    },
+    args: [probeUrl],
+  });
+}
+
+async function captureProbeCookieRequest(tab, cookiePath) {
+  const probeNonce = createCookieProbeNonce();
+  const probeUrl = buildCookieProbeUrl(tab.url, cookiePath, probeNonce);
+  await triggerCookieProbe(tab.id, probeUrl);
+
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const probeRequests = getRecentCookieRequests(tab, {
+      includeProbes: true,
+      includeInternalCommands: false,
+    });
+    const matchedProbeRequest = probeRequests.find((request) => request.probeNonce === probeNonce);
+    if (matchedProbeRequest) {
+      return matchedProbeRequest;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  return null;
+}
+
+async function copyCookiesExact(tabId, cookiePath) {
+  const tab = await browser.tabs.get(tabId);
+  const requestPath = normalizeCookieRequestPath(cookiePath, tab.url);
+  const { matchedRequest } = getObservedCookieRequest(tab, requestPath);
+
+  if (!matchedRequest?.cookieHeader) {
+    for (const [pendingId, pending] of pendingExactCookieCopies.entries()) {
+      if (pending.targetTabId === tabId && pending.requestPath === requestPath) {
+        clearTimeout(pending.timeoutId);
+        pendingExactCookieCopies.delete(pendingId);
+      }
+    }
+
+    const pendingId = `${tabId}:${requestPath}:${Date.now()}`;
+    const timeoutId = setTimeout(() => {
+      pendingExactCookieCopies.delete(pendingId);
+      console.warn('[Tab Reuse] Timed out waiting for observed Cookie header', {
+        tabId,
+        requestPath,
+      });
+    }, PENDING_EXACT_COPY_TIMEOUT_MS);
+
+    pendingExactCookieCopies.set(pendingId, {
+      targetTabId: tabId,
+      requestPath,
+      domain: getDomain(tab.url),
+      cookieStoreId: tab.cookieStoreId || null,
+      timeoutId,
+    });
+
+    console.info('[Tab Reuse] Waiting for next observed Cookie header', {
+      tabId,
+      requestPath,
+      timeoutMs: PENDING_EXACT_COPY_TIMEOUT_MS,
+    });
+    return null;
+  }
+
+  await copyTextToClipboard(tabId, matchedRequest.cookieHeader);
+  return matchedRequest.cookieHeader;
+}
+
+async function copyCookies(tabId, cookiePath) {
   try {
     const tab = await browser.tabs.get(tabId);
-    const cookies = await browser.cookies.getAll({ url: tab.url });
-    const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    const requestPath = normalizeCookieRequestPath(cookiePath, tab.url);
+    const { matchedRequest } = getObservedCookieRequest(tab, requestPath);
+    if (matchedRequest?.cookieHeader) {
+      await copyTextToClipboard(tabId, matchedRequest.cookieHeader);
+      return matchedRequest.cookieHeader;
+    }
 
-    await browser.scripting.executeScript({
-      target: { tabId },
-      func: (text) => {
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-      },
-      args: [cookieString]
-    });
-    return cookieString;
+    const probeRequest = await captureProbeCookieRequest(tab, cookiePath);
+    if (!probeRequest?.cookieHeader) {
+      console.error('[Tab Reuse] Probe request did not yield a Cookie header', {
+        tabId,
+        requestPath,
+      });
+      return null;
+    }
+
+    await copyTextToClipboard(tabId, probeRequest.cookieHeader);
+    return probeRequest.cookieHeader;
   } catch (error) {
     console.error('[Tab Reuse] Error copying cookies:', error);
     return null;
@@ -139,7 +379,10 @@ async function handleTabReuse(tabId, url) {
 
     if (command === 'copy_cookies') {
       await new Promise(resolve => setTimeout(resolve, 100));
-      await copyCookies(targetTabId);
+      await copyCookies(targetTabId, value);
+    } else if (command === 'copy_cookies_exact') {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await copyCookiesExact(targetTabId, value);
     } else if (command === 'delete_cookie' && value) {
       await deleteCookie(targetTabId, value);
     } else if (command === 'delete_cookies' && value) {
@@ -232,19 +475,39 @@ async function handleTabReuse(tabId, url) {
 
 browser.webNavigation.onBeforeNavigate.addListener(async (details) => {
   if (details.frameId !== 0) return;
-  if (hasReuseFlag(details.url) || hasCloseTabsFlag(details.url)) {
+  if (hasReuseFlag(details.url) || hasCloseTabsFlag(details.url) || hasRunJSFlag(details.url)) {
     await handleTabReuse(details.tabId, details.url);
   }
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
-  if (tab.url && getDomain(tab.url) && (hasReuseFlag(tab.url) || hasCloseTabsFlag(tab.url))) {
+  if (tab.url && getDomain(tab.url) && (hasReuseFlag(tab.url) || hasCloseTabsFlag(tab.url) || hasRunJSFlag(tab.url))) {
     await handleTabReuse(tab.id, tab.url);
   }
 });
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.url && tab.url && getDomain(tab.url) && (hasReuseFlag(tab.url) || hasCloseTabsFlag(tab.url))) {
+  if (changeInfo.url && tab.url && getDomain(tab.url) && (hasReuseFlag(tab.url) || hasCloseTabsFlag(tab.url) || hasRunJSFlag(tab.url))) {
     await handleTabReuse(tabId, tab.url);
   }
 });
+
+browser.tabs.onRemoved.addListener((tabId) => {
+  const remainingRequests = recentCookieRequests.filter((request) => request.tabId !== tabId);
+  recentCookieRequests.length = 0;
+  recentCookieRequests.push(...remainingRequests);
+
+  for (const [pendingId, pending] of pendingExactCookieCopies.entries()) {
+    if (pending.targetTabId !== tabId) {
+      continue;
+    }
+    clearTimeout(pending.timeoutId);
+    pendingExactCookieCopies.delete(pendingId);
+  }
+});
+
+browser.webRequest.onSendHeaders.addListener(
+  rememberRecentCookieRequest,
+  { urls: ['<all_urls>'] },
+  ['requestHeaders']
+);
