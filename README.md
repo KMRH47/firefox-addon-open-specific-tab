@@ -95,7 +95,7 @@ GitHub Actions automatically builds, signs with Mozilla, and creates a release.
 
 ## License
 
-MIT
+PolyForm Noncommercial 1.0.0
 
 ## Key Event Blocking (Optional)
 
