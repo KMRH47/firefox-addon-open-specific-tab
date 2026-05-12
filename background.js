@@ -9,6 +9,8 @@ import {
   getCloseTabsPatterns,
   hasCloseTabsFlag,
   removeCloseTabsFlag,
+  hasReloadAllFlag,
+  removeReloadAllFlag,
   matchWildcard,
   normalizeUrlForComparison,
   isRootUrl,
@@ -84,7 +86,8 @@ function rememberRecentCookieRequest(details) {
     isInternalCommand:
       requestUrl.searchParams.has('__reuse_tab') ||
       requestUrl.searchParams.has('__run_js') ||
-      requestUrl.searchParams.has('__close_tabs'),
+      requestUrl.searchParams.has('__close_tabs') ||
+      requestUrl.searchParams.has('__reload_all'),
     probeNonce: requestUrl.searchParams.get(COOKIE_PROBE_PARAM),
     cookieHeader,
     time: now,
@@ -360,9 +363,36 @@ async function deleteCookiesByPrefix(tabId, prefix) {
   }
 }
 
+async function reloadAllTabs(carrierTabId) {
+  const tabs = await browser.tabs.query({
+    url: ['http://*/*', 'https://*/*'],
+    discarded: false,
+  });
+  await Promise.all(
+    tabs
+      .filter((tab) => tab.id !== carrierTabId)
+      .map((tab) => browser.tabs.reload(tab.id).catch((error) => {
+        console.warn('[Tab Reuse] reload_all: failed to reload tab', tab.id, error);
+      }))
+  );
+}
+
 async function handleTabReuse(tabId, url) {
   if (handledTabs.has(tabId)) return;
   handledTabs.add(tabId);
+
+  if (hasReloadAllFlag(url)) {
+    await reloadAllTabs(tabId);
+    if (!hasReuseFlag(url) && !hasRunJSFlag(url) && !hasCloseTabsFlag(url)) {
+      try {
+        await browser.tabs.remove(tabId);
+      } catch (error) {
+        console.warn('[Tab Reuse] reload_all: failed to remove carrier tab', tabId, error);
+      }
+      setTimeout(() => handledTabs.delete(tabId), 5000);
+      return;
+    }
+  }
 
   const jsCode = getRunJSCode(url);
   const closeTabPatterns = getCloseTabsPatterns(url);
@@ -370,6 +400,7 @@ async function handleTabReuse(tabId, url) {
   let cleanUrl = removeReuseFlag(url);
   cleanUrl = removeRunJSFlag(cleanUrl);
   cleanUrl = removeCloseTabsFlag(cleanUrl);
+  cleanUrl = removeReloadAllFlag(cleanUrl);
   const normalizedCleanUrl = normalizeUrlForComparison(cleanUrl);
   const allTabs = await browser.tabs.query({});
   const existingTabs = allTabs.filter(t => t.id !== tabId);
@@ -473,21 +504,25 @@ async function handleTabReuse(tabId, url) {
   setTimeout(() => handledTabs.delete(tabId), 5000);
 }
 
+function hasAddonFlag(url) {
+  return hasReuseFlag(url) || hasCloseTabsFlag(url) || hasRunJSFlag(url) || hasReloadAllFlag(url);
+}
+
 browser.webNavigation.onBeforeNavigate.addListener(async (details) => {
   if (details.frameId !== 0) return;
-  if (hasReuseFlag(details.url) || hasCloseTabsFlag(details.url) || hasRunJSFlag(details.url)) {
+  if (hasAddonFlag(details.url)) {
     await handleTabReuse(details.tabId, details.url);
   }
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
-  if (tab.url && getDomain(tab.url) && (hasReuseFlag(tab.url) || hasCloseTabsFlag(tab.url) || hasRunJSFlag(tab.url))) {
+  if (tab.url && getDomain(tab.url) && hasAddonFlag(tab.url)) {
     await handleTabReuse(tab.id, tab.url);
   }
 });
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.url && tab.url && getDomain(tab.url) && (hasReuseFlag(tab.url) || hasCloseTabsFlag(tab.url) || hasRunJSFlag(tab.url))) {
+  if (changeInfo.url && tab.url && getDomain(tab.url) && hasAddonFlag(tab.url)) {
     await handleTabReuse(tabId, tab.url);
   }
 });

@@ -116,6 +116,25 @@ export function removeCloseTabsFlag(url) {
   }
 }
 
+export function hasReloadAllFlag(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.searchParams.has('__reload_all');
+  } catch (e) {
+    return false;
+  }
+}
+
+export function removeReloadAllFlag(url) {
+  try {
+    const urlObj = new URL(url);
+    urlObj.searchParams.delete('__reload_all');
+    return urlObj.toString();
+  } catch (e) {
+    return url;
+  }
+}
+
 export function matchWildcard(pattern, url) {
   if (!pattern || !url) {
     return false;
@@ -149,6 +168,7 @@ export function normalizeUrlForComparison(url) {
       params.delete('__reuse_tab');
       params.delete('__run_js');
       params.delete('__close_tabs');
+      params.delete('__reload_all');
       const sortedParams = [...params.entries()].sort((a, b) => {
         if (a[0] === b[0]) {
           return a[1].localeCompare(b[1]);

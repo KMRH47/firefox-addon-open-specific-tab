@@ -45,6 +45,20 @@ Multiple patterns can be comma-separated:
 firefox "https://example.com/app?__reuse_tab=1&__close_tabs=login.microsoftonline.com/*,example.com/logout*"
 ```
 
+### Reload All Tabs
+
+Refresh every open http(s) tab in one shot. Useful for re-triggering SSO silent-renew when your daily session expires.
+
+```bash
+firefox "https://reload.localhost/?__reload_all=1"
+```
+
+Reloads every http(s) tab in every window (skipping discarded/unloaded tabs), then closes the carrier tab. Composes with `__reuse_tab` if you want to land on a specific destination after reloading:
+
+```bash
+firefox "https://outlook.office.com/?__reuse_tab=1&__reload_all=1"
+```
+
 ### Run JS Commands
 
 Execute commands on the target tab using `__run_js`:

@@ -12,6 +12,8 @@ import {
   removeRunJSFlag,
   getCloseTabsPatterns,
   removeCloseTabsFlag,
+  hasReloadAllFlag,
+  removeReloadAllFlag,
   matchWildcard,
   normalizeUrlForComparison,
   isRootUrl,
@@ -87,6 +89,43 @@ const tests = {
     const normalized = normalizeUrlForComparison(url);
     assert.ok(!normalized.includes('__close_tabs'));
     assert.ok(normalized.includes('other=value'));
+  },
+
+  'normalizeUrlForComparison: removes __reload_all param': () => {
+    const url = 'https://example.com?__reload_all=1&other=value';
+    const normalized = normalizeUrlForComparison(url);
+    assert.ok(!normalized.includes('__reload_all'));
+    assert.ok(normalized.includes('other=value'));
+  },
+
+  'hasReloadAllFlag: returns true when flag present': () => {
+    assert.strictEqual(hasReloadAllFlag('https://reload.localhost/?__reload_all=1'), true);
+    assert.strictEqual(hasReloadAllFlag('https://example.com/?foo=bar&__reload_all=1'), true);
+  },
+
+  'hasReloadAllFlag: returns false when flag absent': () => {
+    assert.strictEqual(hasReloadAllFlag('https://example.com'), false);
+    assert.strictEqual(hasReloadAllFlag('https://example.com?foo=bar'), false);
+  },
+
+  'hasReloadAllFlag: returns false on invalid url': () => {
+    assert.strictEqual(hasReloadAllFlag('not a url'), false);
+  },
+
+  'removeReloadAllFlag: strips the param and keeps others': () => {
+    const cleaned = removeReloadAllFlag('https://example.com/path?a=1&__reload_all=1&b=2');
+    assert.ok(!cleaned.includes('__reload_all'));
+    assert.ok(cleaned.includes('a=1'));
+    assert.ok(cleaned.includes('b=2'));
+  },
+
+  'removeReloadAllFlag: no-op when flag absent': () => {
+    const url = 'https://example.com/path?a=1';
+    assert.ok(removeReloadAllFlag(url).includes('a=1'));
+  },
+
+  'removeReloadAllFlag: returns input on invalid url': () => {
+    assert.strictEqual(removeReloadAllFlag('not a url'), 'not a url');
   },
 
   'normalizeUrlForComparison: sorts query params for consistent comparison': () => {
