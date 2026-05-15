@@ -135,6 +135,25 @@ export function removeReloadAllFlag(url) {
   }
 }
 
+export function hasNukeMsAuthFlag(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.searchParams.has('__nuke_ms_auth');
+  } catch (e) {
+    return false;
+  }
+}
+
+export function removeNukeMsAuthFlag(url) {
+  try {
+    const urlObj = new URL(url);
+    urlObj.searchParams.delete('__nuke_ms_auth');
+    return urlObj.toString();
+  } catch (e) {
+    return url;
+  }
+}
+
 export function matchWildcard(pattern, url) {
   if (!pattern || !url) {
     return false;
@@ -169,6 +188,7 @@ export function normalizeUrlForComparison(url) {
       params.delete('__run_js');
       params.delete('__close_tabs');
       params.delete('__reload_all');
+      params.delete('__nuke_ms_auth');
       const sortedParams = [...params.entries()].sort((a, b) => {
         if (a[0] === b[0]) {
           return a[1].localeCompare(b[1]);

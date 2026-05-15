@@ -11,6 +11,8 @@ import {
   removeCloseTabsFlag,
   hasReloadAllFlag,
   removeReloadAllFlag,
+  hasNukeMsAuthFlag,
+  removeNukeMsAuthFlag,
   matchWildcard,
   normalizeUrlForComparison,
   isRootUrl,
@@ -87,7 +89,8 @@ function rememberRecentCookieRequest(details) {
       requestUrl.searchParams.has('__reuse_tab') ||
       requestUrl.searchParams.has('__run_js') ||
       requestUrl.searchParams.has('__close_tabs') ||
-      requestUrl.searchParams.has('__reload_all'),
+      requestUrl.searchParams.has('__reload_all') ||
+      requestUrl.searchParams.has('__nuke_ms_auth'),
     probeNonce: requestUrl.searchParams.get(COOKIE_PROBE_PARAM),
     cookieHeader,
     time: now,
@@ -363,6 +366,36 @@ async function deleteCookiesByPrefix(tabId, prefix) {
   }
 }
 
+const MS_AUTH_HOSTNAMES = [
+  'login.microsoftonline.com',
+  'login.microsoft.com',
+  'login.windows.net',
+  'login.live.com',
+  'aadcdn.msftauth.net',
+  'account.microsoft.com',
+  'account.live.com',
+  'outlook.cloud.microsoft',
+  'outlook.office.com',
+  'outlook.office365.com',
+];
+
+async function nukeMsAuth() {
+  try {
+    await browser.browsingData.remove(
+      { hostnames: MS_AUTH_HOSTNAMES },
+      {
+        cookies: true,
+        localStorage: true,
+        indexedDB: true,
+        serviceWorkers: true,
+      }
+    );
+    console.info('[Tab Reuse] nuke_ms_auth: cleared cookies/localStorage/indexedDB/serviceWorkers for', MS_AUTH_HOSTNAMES.join(', '));
+  } catch (error) {
+    console.error('[Tab Reuse] nuke_ms_auth: browsingData.remove failed', error);
+  }
+}
+
 async function reloadAllTabs(carrierTabId) {
   const tabs = await browser.tabs.query({
     url: ['http://*/*', 'https://*/*'],
@@ -380,6 +413,10 @@ async function reloadAllTabs(carrierTabId) {
 async function handleTabReuse(tabId, url) {
   if (handledTabs.has(tabId)) return;
   handledTabs.add(tabId);
+
+  if (hasNukeMsAuthFlag(url)) {
+    await nukeMsAuth();
+  }
 
   if (hasReloadAllFlag(url)) {
     await reloadAllTabs(tabId);
@@ -401,6 +438,7 @@ async function handleTabReuse(tabId, url) {
   cleanUrl = removeRunJSFlag(cleanUrl);
   cleanUrl = removeCloseTabsFlag(cleanUrl);
   cleanUrl = removeReloadAllFlag(cleanUrl);
+  cleanUrl = removeNukeMsAuthFlag(cleanUrl);
   const normalizedCleanUrl = normalizeUrlForComparison(cleanUrl);
   const allTabs = await browser.tabs.query({});
   const existingTabs = allTabs.filter(t => t.id !== tabId);
@@ -505,7 +543,7 @@ async function handleTabReuse(tabId, url) {
 }
 
 function hasAddonFlag(url) {
-  return hasReuseFlag(url) || hasCloseTabsFlag(url) || hasRunJSFlag(url) || hasReloadAllFlag(url);
+  return hasReuseFlag(url) || hasCloseTabsFlag(url) || hasRunJSFlag(url) || hasReloadAllFlag(url) || hasNukeMsAuthFlag(url);
 }
 
 browser.webNavigation.onBeforeNavigate.addListener(async (details) => {
